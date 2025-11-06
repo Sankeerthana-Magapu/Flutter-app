@@ -1,4 +1,4 @@
-🧠 Master Quiz (Quiz Master Pro)
+# 🧠 Master Quiz (Quiz Master Pro)
 
 A modern, gamified **Flutter quiz application** built to test knowledge across various topics while tracking coins, streaks, and progress.  
 Built using **Flutter**, **Dart**, and **SharedPreferences** for persistent local storage.
@@ -25,3 +25,84 @@ Built using **Flutter**, **Dart**, and **SharedPreferences** for persistent loca
 - **Local Storage:** SharedPreferences  
 - **UI:** Material Design 3  
 
+---
+
+## 📂 Folder Structure
+
+```
+lib/
+│
+├── main.dart              # Entry point (QuizMasterApp)
+├── models/                # Data models (if any)
+├── screens/               # HomeScreen, QuizScreen, ProfileScreen
+├── services/              # PersistenceService for local storage
+└── widgets/               # Reusable UI widgets
+```
+
+---
+
+## ⚙️ Installation
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/Sankeerthana-Magapu/Flutter-app.git
+   cd Flutter-app
+   ```
+
+2. **Get Flutter dependencies**
+   ```bash
+   flutter pub get
+   ```
+
+3. **Run the app**
+   ```bash
+   flutter run
+   ```
+
+---
+
+## 📸 Screenshots
+
+| Home Screen | Quiz Screen | Results Screen |
+|--------------|-------------|----------------|
+| ![Home].
+<img width="940" height="529" alt="image" src="https://github.com/user-attachments/assets/8ab1898f-0794-4a33-b0f7-2da22dabb961" />
+
+| ![Quiz]
+<img width="939" height="423" alt="image" src="https://github.com/user-attachments/assets/750776df-afc3-41e4-8d9d-5dec31423e21" />
+
+| ![Results]
+<img width="938" height="478" alt="image" src="https://github.com/user-attachments/assets/27537d83-345b-4ab4-8ce7-d76bf4b148b7" />
+|
+
+> Add your screenshots in the `screenshots/` folder.
+
+---
+
+## 🧩 Future Enhancements
+
+- 🧠 Online question database (Firebase integration)  
+- 🌐 Global leaderboard  
+- 🎨 Custom themes and animations  
+- 📊 Analytics and performance tracking  
+
+---
+
+## 🤝 Contributing
+
+Contributions are always welcome!  
+Feel free to fork this repo, make improvements, and submit a pull request.
+
+---
+
+## 📜 License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 💡 Author
+
+**Sankeerthana Magapu**  
+Flutter Developer ✨  
+[GitHub Profile](https://github.com/Sankeerthana-Magapu)
