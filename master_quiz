@@ -1,0 +1,1388 @@
+// lib/main.dart
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// --------------------- ENTRY ---------------------
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  runApp(QuizMasterApp(prefs: prefs));
+}
+
+class QuizMasterApp extends StatefulWidget {
+  final SharedPreferences prefs;
+  const QuizMasterApp({super.key, required this.prefs});
+  @override
+  State<QuizMasterApp> createState() => _QuizMasterAppState();
+}
+
+class _QuizMasterAppState extends State<QuizMasterApp> {
+  late PersistenceService store;
+
+  @override
+  void initState() {
+    super.initState();
+    store = PersistenceService(widget.prefs);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Quiz Master Pro',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.teal),
+      home: HomeScreen(store: store),
+    );
+  }
+}
+
+/// --------------------- PERSISTENCE ---------------------
+class PersistenceService {
+  final SharedPreferences prefs;
+  PersistenceService(this.prefs);
+
+  static const _kCoins = 'coins';
+  static const _kHistory = 'history';
+  static const _kStreaks = 'streaks'; // map course -> {count, lastDate}
+  static const _kCompleted = 'completed';
+  static const _kProfile = 'profile';
+
+  // profile stored as json: {name:..., avatar: index}
+  Map<String, dynamic> get profile {
+    final s = prefs.getString(_kProfile);
+    if (s == null) return {'name': 'Guest', 'avatar': 0};
+    return jsonDecode(s) as Map<String, dynamic>;
+  }
+
+  Future<void> saveProfile(String name, int avatar) async {
+    prefs.setString(_kProfile, jsonEncode({'name': name, 'avatar': avatar}));
+  }
+
+  int get coins => prefs.getInt(_kCoins) ?? 0;
+  Future<void> addCoins(int c) async => prefs.setInt(_kCoins, coins + c);
+  Future<void> spendCoins(int c) async =>
+      prefs.setInt(_kCoins, (coins - c).clamp(0, 999999));
+
+  List<dynamic> get history {
+    final s = prefs.getString(_kHistory);
+    if (s == null) return [];
+    return jsonDecode(s) as List<dynamic>;
+  }
+
+  Future<void> addHistory(Map<String, dynamic> entry) async {
+    final h = history;
+    h.insert(0, entry);
+    await prefs.setString(_kHistory, jsonEncode(h));
+  }
+
+  Map<String, dynamic> get streaks {
+    final s = prefs.getString(_kStreaks);
+    if (s == null) return {};
+    return jsonDecode(s) as Map<String, dynamic>;
+  }
+
+  /// Update daily streak for a course: increments if last date was yesterday, sets to 1 if new, does nothing if already played today.
+  Future<void> updateDailyStreak(String course) async {
+    final Map<String, dynamic> map = Map<String, dynamic>.from(streaks);
+    final today = DateTime.now().toIso8601String().split('T')[0];
+    if (!map.containsKey(course)) {
+      map[course] = {'count': 1, 'last': today};
+    } else {
+      final current = Map<String, dynamic>.from(map[course]);
+      if (current['last'] == today) {
+        // already played today -> do nothing
+      } else {
+        final last = DateTime.parse(current['last']);
+        final yesterday = DateTime.now().subtract(const Duration(days: 1));
+        if (last.year == yesterday.year &&
+            last.month == yesterday.month &&
+            last.day == yesterday.day) {
+          current['count'] = (current['count'] as int) + 1;
+        } else {
+          current['count'] = 1;
+        }
+        current['last'] = today;
+        map[course] = current;
+      }
+    }
+    await prefs.setString(_kStreaks, jsonEncode(map));
+  }
+
+  int getStreak(String course) {
+    final m = streaks;
+    if (!m.containsKey(course)) return 0;
+    return (m[course]['count'] ?? 0) as int;
+  }
+
+  List<dynamic> getCompletedWeeks(String course) {
+    final s = prefs.getString(_kCompleted);
+    if (s == null) return [];
+    final map = jsonDecode(s) as Map<String, dynamic>;
+    if (!map.containsKey(course)) return [];
+    return map[course] as List<dynamic>;
+  }
+
+  Future<void> markWeekCompleted(String course, String week) async {
+    final s = prefs.getString(_kCompleted);
+    final map = s == null ? <String, dynamic>{} : jsonDecode(s) as Map<String, dynamic>;
+    final list = (map[course] as List<dynamic>?) ?? [];
+    if (!list.contains(week)) list.add(week);
+    map[course] = list;
+    await prefs.setString(_kCompleted, jsonEncode(map));
+  }
+
+  Future<void> clearAll() async {
+    await prefs.remove(_kCoins);
+    await prefs.remove(_kHistory);
+    await prefs.remove(_kStreaks);
+    await prefs.remove(_kCompleted);
+    await prefs.remove(_kProfile);
+  }
+}
+
+/// --------------------- THEME PER COURSE ---------------------
+final Map<String, Color> courseColors = {
+  'C': Colors.blue,
+  'Java': Colors.orange,
+  'DS': Colors.purple,
+  'Flutter': Colors.teal,
+};
+
+final List<IconData> avatarOptions = [
+  Icons.person,
+  Icons.face,
+  Icons.tag_faces,
+  Icons.person_outline,
+  Icons.account_circle,
+];
+
+/// --------------------- QUIZ BANK ---------------------
+final Map<String, Map<String, List<Map<String, dynamic>>>> quizBank = {
+  'C': {
+    'Week 1': [
+      {'q': 'C was developed by?', 'ans': 'Dennis Ritchie', 'options': ['Dennis Ritchie', 'James Gosling', 'Ken Thompson', 'Bjarne Stroustrup']},
+      {'q': 'Header for printf?', 'ans': 'stdio.h', 'options': ['stdio.h', 'string.h', 'stdlib.h', 'math.h']},
+      {'q': 'Symbol to end statement?', 'ans': ';', 'options': [';', ':', '.', ',']},
+      {'q': 'Pointer dereference?', 'ans': '', 'options': ['&', '', '%', '#']},
+      {'q': 'Loop executes at least once?', 'ans': 'do-while', 'options': ['for', 'while', 'do-while', 'none']},
+      {'q': 'sizeof returns?', 'ans': 'size_t', 'options': ['size_t', 'int', 'long', 'double']},
+      {'q': 'Default main return?', 'ans': 'int', 'options': ['void', 'int', 'float', 'char']},
+      {'q': 'Read input function?', 'ans': 'scanf()', 'options': ['scanf()', 'cin', 'input()', 'gets()']},
+      {'q': 'Global lifetime class?', 'ans': 'static', 'options': ['auto', 'register', 'static', 'extern']},
+      {'q': 'Read a character?', 'ans': 'getchar()', 'options': ['getchar()', 'gets()', 'scanf()', 'fgets()']},
+    ],
+    'Week 2': [
+      {'q': 'String functions header?', 'ans': 'string.h', 'options': ['string.h', 'stdio.h', 'math.h', 'ctype.h']},
+      {'q': 'Keyword for constant?', 'ans': 'const', 'options': ['define', 'const', 'static', 'register']},
+      {'q': 'Allocate memory function?', 'ans': 'malloc()', 'options': ['alloc()', 'malloc()', 'new', 'create()']},
+      {'q': 'Address operator?', 'ans': '&', 'options': ['*', '&', '%', '#']},
+      {'q': 'Pointer stores?', 'ans': 'address', 'options': ['value', 'address', 'type', 'size']},
+      {'q': 'Preprocessor directive?', 'ans': '#include', 'options': ['#include', 'import', 'using', 'require']},
+      {'q': 'Not a loop?', 'ans': 'switch', 'options': ['for', 'while', 'switch', 'do-while']},
+      {'q': 'Length of string?', 'ans': 'strlen()', 'options': ['strsize()', 'strlen()', 'size()', 'count()']},
+      {'q': 'Copy string function?', 'ans': 'strcpy()', 'options': ['strcopy()', 'strcpy()', 'copy()', 'memcpy()']},
+      {'q': 'Keyword for volatile?', 'ans': 'volatile', 'options': ['volatile', 'static', 'const', 'register']},
+    ],
+    'Week 3': [
+      {'q': 'Modulo operator?', 'ans': '%', 'options': ['%', '/', '*', '#']},
+      {'q': 'Spec for int?', 'ans': '%d', 'options': ['%i', '%d', '%f', '%c']},
+      {'q': 'Header for math?', 'ans': 'math.h', 'options': ['stdlib.h', 'math.h', 'stdio.h', 'ctype.h']},
+      {'q': 'File mode read+write?', 'ans': 'r+', 'options': ['r', 'w', 'r+', 'a']},
+      {'q': 'Open file function?', 'ans': 'fopen()', 'options': ['open()', 'fopen()', 'fileopen()', 'fopenfile()']},
+      {'q': 'EOF common value?', 'ans': '-1', 'options': ['0', '-1', '1', 'NULL']},
+      {'q': 'Compare strings?', 'ans': 'strcmp()', 'options': ['strcmp()', 'strcomp()', 'compare()', 'strcmpi()']},
+      {'q': 'Bitwise AND?', 'ans': '&', 'options': ['&&', '&', '||', '|']},
+      {'q': 'Keyword extern does?', 'ans': 'external linkage', 'options': ['local scope', 'external linkage', 'static only', 'constant']},
+      {'q': 'Operator to get value?', 'ans': '', 'options': ['&', '', '%', '#']},
+    ],
+  },
+  'Java': {
+    'Week 1': [
+      {'q': 'Java invented by?', 'ans': 'James Gosling', 'options': ['James Gosling', 'Dennis Ritchie', 'Bjarne', 'Guido']},
+      {'q': 'Entry point?', 'ans': 'main()', 'options': ['main()', 'start()', 'init()', 'run()']},
+      {'q': 'Java is?', 'ans': 'Object Oriented', 'options': ['Object Oriented', 'Procedural', 'Functional', 'Assembly']},
+      {'q': 'Company behind Java?', 'ans': 'Sun Microsystems', 'options': ['Sun Microsystems', 'Oracle', 'IBM', 'Microsoft']},
+      {'q': 'Bytecode runs on?', 'ans': 'JVM', 'options': ['JVM', 'JRE', 'JDK', 'JIT']},
+      {'q': 'Prevent inheritance?', 'ans': 'final', 'options': ['final', 'sealed', 'static', 'const']},
+      {'q': 'Package auto imported?', 'ans': 'java.lang', 'options': ['java.util', 'java.io', 'java.lang', 'none']},
+      {'q': 'String is a?', 'ans': 'Class', 'options': ['Primitive', 'Class', 'Interface', 'Enum']},
+      {'q': 'Create object keyword?', 'ans': 'new', 'options': ['new', 'create', 'make', 'this']},
+      {'q': 'Polymorphism means?', 'ans': 'Many forms', 'options': ['Single form', 'Many forms', 'Type safety', 'Encapsulation']},
+    ],
+    'Week 2': [
+      {'q': 'Start thread with?', 'ans': 'start()', 'options': ['run()', 'start()', 'execute()', 'begin()']},
+      {'q': 'Checked exception example?', 'ans': 'IOException', 'options': ['NullPointerException', 'IOException', 'RuntimeException', 'Error']},
+      {'q': 'Ordered collection?', 'ans': 'List', 'options': ['Set', 'Map', 'List', 'Queue']},
+      {'q': 'GC manages?', 'ans': 'Memory', 'options': ['Threads', 'UI', 'Memory', 'Files']},
+      {'q': 'Access modifier?', 'ans': 'private', 'options': ['private', 'static', 'final', 'native']},
+      {'q': 'Thread via?', 'ans': 'Runnable', 'options': ['Callable', 'Runnable', 'ThreadPool', 'ExecutorService']},
+      {'q': 'String is?', 'ans': 'Immutable', 'options': ['Mutable', 'Immutable', 'Primitive', 'Object']},
+      {'q': 'Keyword to inherit?', 'ans': 'extends', 'options': ['implements', 'extends', 'inherits', 'uses']},
+      {'q': 'Keyword to implement?', 'ans': 'implements', 'options': ['extends', 'implements', 'uses', 'inherits']},
+      {'q': 'Immutable list factory?', 'ans': 'List.of', 'options': ['new List', 'List.of', 'Arrays.asList', 'Collections.unmodifiableList']},
+    ],
+    'Week 3': [
+      {'q': 'JVM stands for?', 'ans': 'Java Virtual Machine', 'options': ['Java Virtual Machine', 'Java VM', 'Java Variable Machine', 'Joint VM']},
+      {'q': 'Compile with?', 'ans': 'javac', 'options': ['java', 'javac', 'jvm', 'jlink']},
+      {'q': 'Keyword for package?', 'ans': 'package', 'options': ['package', 'import', 'namespace', 'module']},
+      {'q': 'Thread-safe map?', 'ans': 'ConcurrentHashMap', 'options': ['HashMap', 'ConcurrentHashMap', 'TreeMap', 'Hashtable']},
+      {'q': 'Tool packaging jars?', 'ans': 'jar', 'options': ['jar', 'javap', 'jmod', 'jlink']},
+      {'q': 'Test annotation?', 'ans': '@Test', 'options': ['@Test', '@Before', '@Run', '@Suite']},
+      {'q': 'Array length?', 'ans': '.length', 'options': ['.size()', '.length', '.count', '.length()']},
+      {'q': 'Lambda marker?', 'ans': 'FunctionalInterface', 'options': ['Serializable', 'Cloneable', 'FunctionalInterface', 'Comparable']},
+      {'q': 'Primitive->object?', 'ans': 'Boxing', 'options': ['Boxing', 'Wrapping', 'Casting', 'Typecast']},
+      {'q': 'Concurrent queue?', 'ans': 'ConcurrentLinkedQueue', 'options': ['LinkedList', 'ConcurrentLinkedQueue', 'PriorityQueue', 'ArrayDeque']},
+    ],
+  },
+  'DS': {
+    'Week 1': [
+      {'q': 'Stack principle?', 'ans': 'LIFO', 'options': ['LIFO', 'FIFO', 'Random', 'Ordered']},
+      {'q': 'Queue principle?', 'ans': 'FIFO', 'options': ['LIFO', 'FIFO', 'LILO', 'FILO']},
+      {'q': 'Binary tree max children?', 'ans': '2', 'options': ['1', '2', '3', '4']},
+      {'q': 'BFS uses?', 'ans': 'Queue', 'options': ['Stack', 'Queue', 'Heap', 'Array']},
+      {'q': 'DFS uses?', 'ans': 'Stack', 'options': ['Queue', 'Stack', 'Hash', 'Tree']},
+      {'q': 'Binary search works on?', 'ans': 'Sorted arrays', 'options': ['Unsorted arrays', 'Arrays', 'Sorted arrays', 'Linked lists']},
+      {'q': 'Heap used for?', 'ans': 'Priority', 'options': ['Stack', 'Queue', 'Priority', 'Graph']},
+      {'q': 'Linked list stores?', 'ans': 'Nodes', 'options': ['Elements', 'Nodes', 'Values', 'Indexes']},
+      {'q': 'AVL tree purpose?', 'ans': 'Balance', 'options': ['Speed', 'Memory', 'Balance', 'Security']},
+      {'q': 'Dijkstra finds?', 'ans': 'Shortest path', 'options': ['MST', 'Shortest path', 'Traversal', 'Cycle']},
+    ],
+    'Week 2': [
+      {'q': 'Non-linear DS?', 'ans': 'Graph', 'options': ['Array', 'Stack', 'Graph', 'Queue']},
+      {'q': 'Merge sort avg?', 'ans': 'O(n log n)', 'options': ['O(n^2)', 'O(n log n)', 'O(n)', 'O(log n)']},
+      {'q': 'LRU cache DS?', 'ans': 'LinkedHashMap', 'options': ['Array', 'LinkedList', 'LinkedHashMap', 'Queue']},
+      {'q': 'Balanced BST?', 'ans': 'AVL', 'options': ['BST', 'AVL', 'Heap', 'Graph']},
+      {'q': 'Detect cycle with?', 'ans': 'DFS', 'options': ['BFS', 'DFS', 'Dijkstra', 'Prim']},
+      {'q': 'Topological sort used on?', 'ans': 'DAG', 'options': ['Cyclic', 'DAG', 'Tree', 'Graph']},
+      {'q': 'Adj list used for?', 'ans': 'Sparse graph', 'options': ['Dense graph', 'Sparse graph', 'Tree', 'Array']},
+      {'q': 'In-place sort example?', 'ans': 'Quick Sort', 'options': ['Merge Sort', 'Quick Sort', 'Radix Sort', 'Counting Sort']},
+      {'q': 'MST algorithm?', 'ans': 'Kruskal', 'options': ['Dijkstra', 'Kruskal', 'Prim', 'Floyd']},
+      {'q': 'Binary children sides?', 'ans': 'Left & Right', 'options': ['One', 'Left & Right', 'Multiple', 'None']},
+    ],
+    'Week 3': [
+      {'q': 'Sorted traversal in BST?', 'ans': 'Inorder', 'options': ['Preorder', 'Inorder', 'Postorder', 'Levelorder']},
+      {'q': 'Recursion uses which DS?', 'ans': 'Stack', 'options': ['Queue', 'Stack', 'Tree', 'Graph']},
+      {'q': 'Connected components found by?', 'ans': 'DFS/BFS', 'options': ['Dijkstra', 'DFS/BFS', 'Kruskal', 'Prim']},
+      {'q': 'O(1) average lookup DS?', 'ans': 'Hash Map', 'options': ['Array', 'Heap', 'Hash Map', 'List']},
+      {'q': 'Undo operation uses?', 'ans': 'Stack', 'options': ['Queue', 'Stack', 'Graph', 'Tree']},
+      {'q': 'Priority stored in?', 'ans': 'Heap', 'options': ['Queue', 'Heap', 'Stack', 'List']},
+      {'q': 'Cycle in graph called?', 'ans': 'Cycle', 'options': ['Tree', 'Cycle', 'DAG', 'None']},
+      {'q': 'Average hash lookup?', 'ans': 'O(1)', 'options': ['O(log n)', 'O(n)', 'O(1)', 'O(n log n)']},
+      {'q': 'Balanced tree example?', 'ans': 'AVL', 'options': ['BST', 'AVL', 'Heap', 'Trie']},
+      {'q': 'Prefix-search DS?', 'ans': 'Trie', 'options': ['Hash', 'Trie', 'Array', 'List']},
+    ],
+  },
+  'Flutter': {
+    'Week 1': [
+      {'q': 'Flutter language?', 'ans': 'Dart', 'options': ['Dart', 'Java', 'Kotlin', 'Swift']},
+      {'q': 'Vertical widget?', 'ans': 'Column', 'options': ['Row', 'Column', 'Stack', 'Container']},
+      {'q': 'Hot reload does?', 'ans': 'Update UI instantly', 'options': ['Restart app', 'Update UI instantly', 'Compile code', 'Run tests']},
+      {'q': 'Scaffold provides?', 'ans': 'Basic layout', 'options': ['Networking', 'Animation', 'Basic layout', 'Database']},
+      {'q': 'Start app function?', 'ans': 'runApp()', 'options': ['startApp()', 'runApp()', 'initApp()', 'main()']},
+      {'q': 'Stateless widget is?', 'ans': 'Immutable', 'options': ['Mutable', 'Immutable', 'Dynamic', 'Stateful']},
+      {'q': 'Stateful widget has?', 'ans': 'Mutable state', 'options': ['No state', 'Mutable state', 'Constant state', 'Hidden state']},
+      {'q': 'pubspec.yaml used for?', 'ans': 'Dependencies', 'options': ['Tests', 'Dependencies', 'UI', 'Routes']},
+      {'q': 'Main UI lib?', 'ans': 'Material', 'options': ['Cupertino', 'Material', 'WidgetsX', 'UIKit']},
+      {'q': 'Show an image widget?', 'ans': 'Image', 'options': ['Picture', 'Image', 'Graphic', 'Media']},
+    ],
+    'Week 2': [
+      {'q': 'Layout widgets?', 'ans': 'Row/Column', 'options': ['Row/Column', 'Image', 'Text', 'Icon']},
+      {'q': 'List widget?', 'ans': 'ListView', 'options': ['Grid', 'ListView', 'Stack', 'Container']},
+      {'q': 'pubspec contains?', 'ans': 'dependencies', 'options': ['assets', 'android', 'dependencies', 'plugins']},
+      {'q': 'App shell?', 'ans': 'MaterialApp', 'options': ['MaterialApp', 'Scaffold', 'AppBar', 'Navigator']},
+      {'q': 'Widget spacing?', 'ans': 'SizedBox', 'options': ['Spacer', 'Padding', 'SizedBox', 'Container']},
+      {'q': 'Clickable widget?', 'ans': 'InkWell', 'options': ['GestureDetector', 'InkWell', 'Clickable', 'Button']},
+      {'q': 'Screen size helper?', 'ans': 'MediaQuery', 'options': ['LayoutBuilder', 'MediaQuery', 'ContextSize', 'SizeBox']},
+      {'q': 'Simple state mgmt?', 'ans': 'setState', 'options': ['Provider', 'setState', 'Bloc', 'Redux']},
+      {'q': 'Single child scroll?', 'ans': 'SingleChildScrollView', 'options': ['ScrollContainer', 'SingleChildScrollView', 'ListView', 'PageView']},
+      {'q': 'Anim controller class?', 'ans': 'AnimationController', 'options': ['AnimationController', 'Animator', 'Motion', 'MotionController']},
+    ],
+    'Week 3': [
+      {'q': 'Routing?', 'ans': 'Navigator', 'options': ['Router', 'Navigator', 'RouteManager', 'Screen']},
+      {'q': 'Icon widget?', 'ans': 'Icon', 'options': ['Icon', 'Image', 'Graphic', 'Symbol']},
+      {'q': 'Text widget?', 'ans': 'Text', 'options': ['Label', 'Text', 'Paragraph', 'String']},
+      {'q': 'Theme helper?', 'ans': 'ThemeData', 'options': ['ThemeData', 'ThemeMode', 'Theme', 'Style']},
+      {'q': 'Hot restart compared to?', 'ans': 'Hot reload', 'options': ['Full restart', 'Hot reload', 'Hot restart', 'Cold start']},
+      {'q': 'Form input widget?', 'ans': 'TextField', 'options': ['Input', 'TextField', 'Form', 'TextForm']},
+      {'q': 'Adaptive layout?', 'ans': 'Flexible', 'options': ['Flexible', 'Expanded', 'Wrap', 'LayoutBuilder']},
+      {'q': 'Tabs?', 'ans': 'TabBar', 'options': ['TabBar', 'BottomNavigationBar', 'AppBar', 'Drawer']},
+      {'q': 'Grid helper?', 'ans': 'GridView', 'options': ['GridView', 'ListView', 'Column', 'Row']},
+      {'q': 'Gesture widget?', 'ans': 'GestureDetector', 'options': ['InkWell', 'GestureDetector', 'Clickable', 'Listener']},
+    ],
+  },
+};
+
+/// --------------------- HOME ---------------------
+class HomeScreen extends StatefulWidget {
+  final PersistenceService store;
+  const HomeScreen({super.key, required this.store});
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  late PersistenceService store;
+  @override
+  void initState() {
+    super.initState();
+    store = widget.store;
+  }
+
+  void refresh() => setState(() {});
+
+  @override
+  Widget build(BuildContext context) {
+    final profile = store.profile;
+    final name = profile['name'] as String;
+    final avatar = (profile['avatar'] as int?) ?? 0;
+    final coins = store.coins;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Quiz Master Pro')),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Card(
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: Colors.grey.shade200,
+                child: Icon(avatarOptions[avatar % avatarOptions.length], size: 32, color: Colors.black87),
+              ),
+              title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('Coins: $coins 🪙'),
+              trailing: ElevatedButton.icon(
+                icon: const Icon(Icons.edit),
+                label: const Text('Edit Profile'),
+                onPressed: () async {
+                  await Navigator.push(context, MaterialPageRoute(builder: (_) => EditProfileScreen(store: store)));
+                  setState(() {});
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: ListView(
+              children: [
+                // Courses
+                ...quizBank.keys.map((course) {
+                  final completed = store.getCompletedWeeks(course).cast<String>();
+                  final streak = store.getStreak(course);
+                  final color = courseColors[course]!;
+                  return Card(
+                    child: ListTile(
+                      leading: CircleAvatar(backgroundColor: color, child: Text(course[0], style: const TextStyle(color: Colors.white))),
+                      title: Text(course, style: const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text('Daily streak: $streak | Completed: ${completed.join(', ')}'),
+                      trailing: Icon(Icons.arrow_forward_ios, color: color),
+                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => CourseScreen(course: course, store: store))),
+                    ),
+                  );
+                }).toList(),
+                const SizedBox(height: 12),
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.games),
+                  label: const Text('Games & Store'),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => GamesAndStoreScreen(store: store))),
+                ),
+                const SizedBox(height: 8),
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.history),
+                  label: const Text('History'),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => HistoryScreen(store: store))),
+                ),
+                const SizedBox(height: 8),
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.settings),
+                  label: const Text('Settings'),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => SettingsScreen(store: store))),
+                ),
+              ],
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- EDIT PROFILE ---------------------
+class EditProfileScreen extends StatefulWidget {
+  final PersistenceService store;
+  const EditProfileScreen({super.key, required this.store});
+  @override
+  State<EditProfileScreen> createState() => _EditProfileScreenState();
+}
+
+class _EditProfileScreenState extends State<EditProfileScreen> {
+  late TextEditingController _nameCtrl;
+  int _avatarIdx = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    final p = widget.store.profile;
+    _nameCtrl = TextEditingController(text: p['name'] ?? 'Guest');
+    _avatarIdx = (p['avatar'] as int?) ?? 0;
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  void save() async {
+    await widget.store.saveProfile(_nameCtrl.text.trim().isEmpty ? 'Guest' : _nameCtrl.text.trim(), _avatarIdx);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile saved')));
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Edit Profile')),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          CircleAvatar(radius: 48, backgroundColor: Colors.grey.shade200, child: Icon(avatarOptions[_avatarIdx], size: 56)),
+          const SizedBox(height: 12),
+          TextField(controller: _nameCtrl, decoration: const InputDecoration(labelText: 'Display name')),
+          const SizedBox(height: 12),
+          const Text('Choose Avatar'),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: List.generate(avatarOptions.length, (i) {
+              final sel = i == _avatarIdx;
+              return GestureDetector(
+                onTap: () => setState(() => _avatarIdx = i),
+                child: CircleAvatar(
+                  radius: sel ? 28 : 22,
+                  backgroundColor: sel ? Colors.teal : Colors.grey.shade200,
+                  child: Icon(avatarOptions[i], color: sel ? Colors.white : Colors.black54),
+                ),
+              );
+            }),
+          ),
+          const SizedBox(height: 20),
+          ElevatedButton.icon(icon: const Icon(Icons.save), label: const Text('Save'), onPressed: save),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- COURSE SCREEN ---------------------
+class CourseScreen extends StatelessWidget {
+  final String course;
+  final PersistenceService store;
+  const CourseScreen({super.key, required this.course, required this.store});
+
+  @override
+  Widget build(BuildContext context) {
+    final weeks = quizBank[course]!.keys.toList();
+    final color = courseColors[course]!;
+    return Scaffold(
+      appBar: AppBar(title: Text('$course Course'), backgroundColor: color),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Card(child: ListTile(title: Text(course, style: const TextStyle(fontWeight: FontWeight.bold)), subtitle: const Text('Complete weekly quizzes & play games'))),
+          const SizedBox(height: 8),
+          Expanded(
+            child: ListView(
+              children: weeks.map((w) {
+                final done = store.getCompletedWeeks(course).contains(w);
+                return Card(child: ListTile(
+                  leading: Icon(done ? Icons.check_circle : Icons.play_circle, color: done ? Colors.green : color),
+                  title: Text(w),
+                  subtitle: Text(done ? 'Completed' : 'Tap to start'),
+                  trailing: PopupMenuButton<String>(
+                    onSelected: (m) {
+                      if (m == 'classic') {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => WeeklyQuizScreen(course: course, week: w, questions: List<Map<String,dynamic>>.from(quizBank[course]![w]!), store: store, color: color)));
+                      } else if (m == 'rapid') {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => RapidFireScreen(course: course, week: w, store: store, color: color)));
+                      } else if (m == 'tf') {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => TrueFalseScreen(course: course, week: w, store: store, color: color)));
+                      } else if (m == 'match') {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => MatchPairScreen(course: course, week: w, store: store, color: color)));
+                      } else if (m == 'guess') {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => GuessOutputScreen(course: course, week: w, store: store, color: color)));
+                      } else if (m == 'memory') {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => MemoryChallengeScreen(course: course, week: w, store: store, color: color)));
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'classic', child: Text('Classic Quiz (10 Q)')),
+                      PopupMenuItem(value: 'rapid', child: Text('Rapid Fire')),
+                      PopupMenuItem(value: 'tf', child: Text('True / False')),
+                      PopupMenuItem(value: 'match', child: Text('Match Pair')),
+                      PopupMenuItem(value: 'guess', child: Text('Guess Output')),
+                      PopupMenuItem(value: 'memory', child: Text('Memory Challenge')),
+                    ],
+                  ),
+                ));
+              }).toList(),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- GAMES & STORE SCREEN ---------------------
+class GamesAndStoreScreen extends StatelessWidget {
+  final PersistenceService store;
+  const GamesAndStoreScreen({super.key, required this.store});
+  @override
+  Widget build(BuildContext context) {
+    final coins = store.coins;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Games & Store')),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Card(child: ListTile(leading: const Icon(Icons.monetization_on), title: Text('You have $coins 🪙'), subtitle: const Text('Spend 1000 coins to buy premium course'))),
+          const SizedBox(height: 8),
+          ElevatedButton.icon(icon: const Icon(Icons.shopping_bag), label: const Text('Buy Premium Course (1000 coins)'), onPressed: coins >= 1000 ? () async {
+            await store.spendCoins(1000);
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Premium Course unlocked! (demo)')));
+            (context as Element).markNeedsBuild();
+          } : null),
+          const SizedBox(height: 12),
+          const Divider(),
+          const SizedBox(height: 8),
+          const Text('Mini Games', style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            ElevatedButton.icon(icon: const Icon(Icons.flash_on), label: const Text('Quick Trivia'), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => QuickTriviaScreen(store: store)))),
+            ElevatedButton.icon(icon: const Icon(Icons.timer), label: const Text('Time Attack'), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => TimeAttackScreen(store: store)))),
+            ElevatedButton.icon(icon: const Icon(Icons.memory), label: const Text('Memory Game'), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ShortMemoryGame(store: store)))),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- WEEKLY QUIZ (CLASSIC) ---------------------
+/// This widget collects userAnswers, displays per-question feedback immediately (green/red),
+/// and at the end navigates to EndOfWeekSummary that shows all questions with user answers color-coded.
+class WeeklyQuizScreen extends StatefulWidget {
+  final String course;
+  final String week;
+  final List<Map<String, dynamic>> questions;
+  final PersistenceService store;
+  final Color color;
+  const WeeklyQuizScreen({super.key, required this.course, required this.week, required this.questions, required this.store, required this.color});
+  @override
+  State<WeeklyQuizScreen> createState() => _WeeklyQuizScreenState();
+}
+
+class _WeeklyQuizScreenState extends State<WeeklyQuizScreen> {
+  int idx = 0;
+  int score = 0;
+  int coinsEarned = 0;
+  String? selected;
+  late List<String?> userAnswers; // record user choices (null until answered)
+
+  @override
+  void initState() {
+    super.initState();
+    userAnswers = List<String?>.filled(widget.questions.length, null);
+  }
+
+  void choose(String opt) async {
+    if (selected != null) return;
+    setState(() {
+      selected = opt;
+      userAnswers[idx] = opt;
+      final correct = widget.questions[idx]['ans'] as String;
+      if (opt == correct) {
+        score++;
+        coinsEarned += 10;
+      }
+    });
+
+    // brief reveal of correct/wrong
+    await Future.delayed(const Duration(milliseconds: 700));
+
+    if (idx < widget.questions.length - 1) {
+      setState(() {
+        idx++;
+        selected = null;
+      });
+    } else {
+      // finished weekly quiz: persist results and update daily streak
+      await widget.store.addCoins(coinsEarned);
+      await widget.store.addHistory({
+        'course': widget.course,
+        'week': widget.week,
+        'mode': 'Weekly',
+        'score': score,
+        'total': widget.questions.length,
+        'coins': coinsEarned,
+        'date': DateTime.now().toIso8601String(),
+      });
+      await widget.store.markWeekCompleted(widget.course, widget.week);
+      await widget.store.updateDailyStreak(widget.course);
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => EndOfWeekSummary(
+            course: widget.course,
+            week: widget.week,
+            questions: widget.questions,
+            userAnswers: userAnswers,
+            score: score,
+            total: widget.questions.length,
+            coins: coinsEarned,
+            store: widget.store,
+            color: widget.color,
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = widget.questions[idx];
+    return Scaffold(
+      appBar: AppBar(title: Text('${widget.course} • ${widget.week}'), backgroundColor: widget.color),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Text('Question ${idx+1}/${widget.questions.length}', style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Card(color: widget.color.withOpacity(0.08), child: Padding(padding: const EdgeInsets.all(12), child: Text(q['q'] as String))),
+          const SizedBox(height: 12),
+          ...((q['options'] as List<String>).map((opt) {
+            Color? btnColor;
+            if (selected != null) {
+              final correct = q['ans'] as String;
+              if (opt == correct) btnColor = Colors.green;
+              else if (opt == selected) btnColor = Colors.red;
+            }
+            return Container(
+              margin: const EdgeInsets.symmetric(vertical: 6),
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: btnColor),
+                onPressed: selected == null ? () => choose(opt) : null,
+                child: Text(opt),
+              ),
+            );
+          })).toList(),
+          const Spacer(),
+          Text('Score: $score   Coins (this run): $coinsEarned 🪙'),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- END OF WEEK SUMMARY ---------------------
+/// Shows all questions with correct/incorrect highlights:
+/// - correct answer → green
+/// - user's wrong choice → red
+class EndOfWeekSummary extends StatelessWidget {
+  final String course;
+  final String week;
+  final List<Map<String, dynamic>> questions;
+  final List<String?> userAnswers;
+  final int score;
+  final int total;
+  final int coins;
+  final PersistenceService store;
+  final Color color;
+
+  const EndOfWeekSummary({
+    super.key,
+    required this.course,
+    required this.week,
+    required this.questions,
+    required this.userAnswers,
+    required this.score,
+    required this.total,
+    required this.coins,
+    required this.store,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final streak = store.getStreak(course);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Week Summary'), backgroundColor: color),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Card(child: ListTile(
+            leading: const Icon(Icons.emoji_events, color: Colors.amber),
+            title: Text('$course • $week', style: const TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text('Score: $score / $total  •  Coins: $coins  •  Daily Streak: $streak'),
+          )),
+          const SizedBox(height: 12),
+          Expanded(
+            child: ListView.builder(
+              itemCount: questions.length,
+              itemBuilder: (_, i) {
+                final q = questions[i];
+                final user = userAnswers[i];
+                final correct = q['ans'] as String;
+                return Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('Q${i+1}: ${q['q']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 6),
+                      ...((q['options'] as List<String>).map((opt) {
+                        Color? bg;
+                        if (opt == correct) bg = Colors.green.shade300;
+                        else if (opt == user && user != correct) bg = Colors.red.shade300;
+                        return Container(
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                          decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(6)),
+                          child: Text(opt),
+                        );
+                      })).toList(),
+                    ]),
+                  ),
+                );
+              },
+            ),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.home),
+            label: const Text('Back to Home'),
+            onPressed: () => Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => HomeScreen(store: store)), (route) => false),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- RAPID FIRE ---------------------
+class RapidFireScreen extends StatefulWidget {
+  final String course;
+  final String week;
+  final PersistenceService store;
+  final Color color;
+  const RapidFireScreen({super.key, required this.course, required this.week, required this.store, required this.color});
+  @override
+  State<RapidFireScreen> createState() => _RapidFireScreenState();
+}
+
+class _RapidFireScreenState extends State<RapidFireScreen> {
+  late List<Map<String, dynamic>> questions;
+  int idx = 0, score = 0, coins = 0;
+  late Timer timer;
+  int secondsLeft = 10;
+  bool running = true;
+
+  @override
+  void initState() {
+    super.initState();
+    questions = List<Map<String, dynamic>>.from(quizBank[widget.course]![widget.week]!);
+    questions.shuffle();
+    questions = questions.take(10).toList();
+    _startTimer();
+  }
+
+  void _startTimer() {
+    secondsLeft = 10;
+    timer = Timer.periodic(const Duration(seconds: 1), (t) {
+      setState(() {
+        secondsLeft--;
+      });
+      if (secondsLeft <= 0) {
+        _nextWithoutAnswer();
+      }
+    });
+  }
+
+  void _nextWithoutAnswer() {
+    timer.cancel();
+    if (idx < questions.length - 1) {
+      setState(() {
+        idx++;
+        secondsLeft = 10;
+      });
+      _startTimer();
+    } else {
+      _finish();
+    }
+  }
+
+  void answer(String opt) {
+    if (!running) return;
+    final correct = questions[idx]['ans'] as String;
+    if (opt == correct) {
+      score++; coins += 15; // rapid gives 15
+    }
+    timer.cancel();
+    if (idx < questions.length - 1) {
+      setState(() { idx++; secondsLeft = 10; });
+      _startTimer();
+    } else {
+      _finish();
+    }
+  }
+
+  Future<void> _finish() async {
+    running = false;
+    timer.cancel();
+    await widget.store.addCoins(coins);
+    await widget.store.addHistory({'course': widget.course, 'week': widget.week, 'mode': 'Rapid', 'score': score, 'total': questions.length, 'coins': coins, 'date': DateTime.now().toIso8601String()});
+    await widget.store.updateDailyStreak(widget.course);
+    if (!mounted) return;
+    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => EndOfWeekSummary(
+      course: widget.course, week: widget.week, questions: questions, userAnswers: List<String?>.filled(questions.length, null), score: score, total: questions.length, coins: coins, store: widget.store, color: widget.color
+    )));
+  }
+
+  @override
+  void dispose() {
+    if (timer.isActive) timer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = questions[idx];
+    return Scaffold(
+      appBar: AppBar(title: const Text('Rapid Fire'), backgroundColor: widget.color),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text('Q ${idx+1}/${questions.length}', style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text('Time: $secondsLeft s', style: const TextStyle(fontWeight: FontWeight.bold)),
+          ]),
+          const SizedBox(height: 8),
+          Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(q['q'] as String))),
+          const SizedBox(height: 8),
+          ...((q['options'] as List<String>).map((opt) => Container(
+            margin: const EdgeInsets.symmetric(vertical: 6),
+            child: ElevatedButton(onPressed: () => answer(opt), child: Text(opt)),
+          ))).toList(),
+          const Spacer(),
+          Text('Score: $score   Coins: $coins 🪙'),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- TRUE / FALSE ---------------------
+class TrueFalseScreen extends StatefulWidget {
+  final String course;
+  final String week;
+  final PersistenceService store;
+  final Color color;
+  const TrueFalseScreen({super.key, required this.course, required this.week, required this.store, required this.color});
+  @override
+  State<TrueFalseScreen> createState() => _TrueFalseScreenState();
+}
+
+class _TrueFalseScreenState extends State<TrueFalseScreen> {
+  late List<Map<String, dynamic>> qlist;
+  int idx = 0, score = 0, coins = 0;
+  String? selected;
+  @override
+  void initState() {
+    super.initState();
+    qlist = List<Map<String,dynamic>>.from(quizBank[widget.course]![widget.week]!);
+    qlist = qlist.map((q) {
+      final correct = q['ans'] as String;
+      final options = List<String>.from(q['options'] as List<String>);
+      final truth = Random().nextBool();
+      if (truth) {
+        return {'q': '${q['q']} -> "$correct" ?', 'ans': true, 'correctText': correct};
+      } else {
+        final wrongs = options.where((o) => o != correct).toList();
+        final pick = (wrongs..shuffle()).first;
+        return {'q': '${q['q']} -> "$pick" ?', 'ans': false, 'correctText': correct};
+      }
+    }).toList();
+  }
+
+  void choose(bool val) async {
+    if (selected != null) return;
+    setState(() => selected = val ? 'T' : 'F');
+    final truth = qlist[idx]['ans'] as bool;
+    if (val == truth) { score++; coins += 8; }
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (idx < qlist.length - 1) {
+      setState(() { idx++; selected = null; });
+    } else {
+      await widget.store.addCoins(coins);
+      await widget.store.addHistory({'course': widget.course, 'week': widget.week, 'mode': 'TF', 'score': score, 'total': qlist.length, 'coins': coins, 'date': DateTime.now().toIso8601String()});
+      await widget.store.updateDailyStreak(widget.course);
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => EndOfWeekSummary(
+        course: widget.course, week: widget.week, questions: qlist.map((e) => {'q': e['q'], 'ans': e['correctText'], 'options': [e['correctText'], 'True/False']} ).toList(), userAnswers: List<String?>.filled(qlist.length, null), score: score, total: qlist.length, coins: coins, store: widget.store, color: widget.color
+      )));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final item = qlist[idx];
+    return Scaffold(
+      appBar: AppBar(title: const Text('True / False'), backgroundColor: widget.color),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Text('Q ${idx+1}/${qlist.length}', style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(item['q'] as String))),
+          const SizedBox(height: 12),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+            ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: selected == 'T' ? Colors.green : null), onPressed: selected == null ? () => choose(true) : null, child: const Text('True')),
+            ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: selected == 'F' ? Colors.red : null), onPressed: selected == null ? () => choose(false) : null, child: const Text('False')),
+          ]),
+          const Spacer(),
+          Text('Score: $score   Coins: $coins 🪙'),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- MATCH PAIR ---------------------
+class MatchPairScreen extends StatefulWidget {
+  final String course;
+  final String week;
+  final PersistenceService store;
+  final Color color;
+  const MatchPairScreen({super.key, required this.course, required this.week, required this.store, required this.color});
+  @override
+  State<MatchPairScreen> createState() => _MatchPairScreenState();
+}
+
+class _MatchPairScreenState extends State<MatchPairScreen> {
+  late List<Map<String,String>> pairs;
+  late List<String> left, right;
+  String? pickedLeft;
+  int matches = 0;
+  int coins = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    final qlist = quizBank[widget.course]![widget.week]!;
+    pairs = qlist.take(6).map((q) => {'q': q['q'] as String, 'a': q['ans'] as String}).toList();
+    left = pairs.map((p) => p['q']!).toList()..shuffle();
+    right = pairs.map((p) => p['a']!).toList()..shuffle();
+  }
+
+  void selectLeft(String l) {
+    setState(() { pickedLeft = l; });
+  }
+
+  void selectRight(String r) async {
+    if (pickedLeft == null) return;
+    final pair = pairs.firstWhere((p) => p['q'] == pickedLeft);
+    if (pair['a'] == r) {
+      setState(() { matches++; coins += 12; left.remove(pickedLeft); right.remove(r); pickedLeft = null; });
+    } else {
+      setState(() { pickedLeft = null; });
+    }
+    if (matches >= pairs.length) {
+      await widget.store.addCoins(coins);
+      await widget.store.addHistory({'course': widget.course, 'week': widget.week, 'mode': 'Match', 'score': matches, 'total': pairs.length, 'coins': coins, 'date': DateTime.now().toIso8601String()});
+      await widget.store.updateDailyStreak(widget.course);
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => EndOfWeekSummary(course: widget.course, week: widget.week, questions: pairs.map((p)=>{'q':p['q'],'ans':p['a'],'options':[p['a']]}).toList(), userAnswers: List<String?>.filled(pairs.length, null), score: matches, total: pairs.length, coins: coins, store: widget.store, color: widget.color)));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Match Pair'), backgroundColor: widget.color),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          const Text('Match the question to correct answer'),
+          const SizedBox(height: 12),
+          Expanded(
+            child: Row(children: [
+              Expanded(child: Column(children: left.map((l) => GestureDetector(
+                onTap: () => selectLeft(l),
+                child: Card(color: pickedLeft==l? Colors.yellow.shade200 : null, child: Padding(padding: const EdgeInsets.all(8), child: Text(l, maxLines: 2, overflow: TextOverflow.ellipsis)))),
+              ).toList())),
+              const VerticalDivider(),
+              Expanded(child: Column(children: right.map((r) => GestureDetector(
+                onTap: () => selectRight(r),
+                child: Card(child: Padding(padding: const EdgeInsets.all(8), child: Text(r))),
+              )).toList())),
+            ]),
+          ),
+          Text('Matches: $matches'),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- GUESS OUTPUT ---------------------
+class GuessOutputScreen extends StatefulWidget {
+  final String course;
+  final String week;
+  final PersistenceService store;
+  final Color color;
+  const GuessOutputScreen({super.key, required this.course, required this.week, required this.store, required this.color});
+  @override
+  State<GuessOutputScreen> createState() => _GuessOutputScreenState();
+}
+
+class _GuessOutputScreenState extends State<GuessOutputScreen> {
+  late List<Map<String,String>> items;
+  int idx = 0, score = 0, coins = 0;
+  String? selected;
+  @override
+  void initState() {
+    super.initState();
+    items = [
+      {'code': 'print("Hello")', 'out': 'Hello'},
+      {'code': '1 + 2', 'out': '3'},
+      {'code': 'len("abc")', 'out': '3'},
+      {'code': 'True and False', 'out': 'False'},
+      {'code': '5 % 2', 'out': '1'},
+    ];
+    items.shuffle();
+  }
+
+  void pick(String ans) async {
+    if (selected != null) return;
+    setState(() => selected = ans);
+    if (ans == items[idx]['out']) { score++; coins += 12; }
+    await Future.delayed(const Duration(milliseconds: 700));
+    if (idx < items.length - 1) {
+      setState(() { idx++; selected = null; });
+    } else {
+      await widget.store.addCoins(coins);
+      await widget.store.addHistory({'course': widget.course, 'week': widget.week, 'mode': 'Guess', 'score': score, 'total': items.length, 'coins': coins, 'date': DateTime.now().toIso8601String()});
+      await widget.store.updateDailyStreak(widget.course);
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => EndOfWeekSummary(course: widget.course, week: widget.week, questions: items.map((e)=>{'q': e['code'], 'ans': e['out'], 'options': [e['out'],'None','Error','0']}).toList(), userAnswers: List<String?>.filled(items.length, null), score: score, total: items.length, coins: coins, store: widget.store, color: widget.color)));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final it = items[idx];
+    final options = [it['out']!, 'None', 'Error', '0']..shuffle();
+    return Scaffold(
+      appBar: AppBar(title: const Text('Guess Output'), backgroundColor: widget.color),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          const Text('What is the output of:'),
+          const SizedBox(height: 8),
+          Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(it['code']!))),
+          const SizedBox(height: 12),
+          ...options.map((o) => Container(margin: const EdgeInsets.symmetric(vertical: 6), child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: selected != null ? (o==it['out']?Colors.green:(o==selected?Colors.red:null)) : null), onPressed: selected==null?()=>pick(o):null, child: Text(o)))).toList(),
+          const Spacer(),
+          Text('Score: $score   Coins: $coins 🪙'),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- MEMORY CHALLENGE ---------------------
+class MemoryChallengeScreen extends StatefulWidget {
+  final String course;
+  final String week;
+  final PersistenceService store;
+  final Color color;
+  const MemoryChallengeScreen({super.key, required this.course, required this.week, required this.store, required this.color});
+  @override
+  State<MemoryChallengeScreen> createState() => _MemoryChallengeScreenState();
+}
+
+class _MemoryChallengeScreenState extends State<MemoryChallengeScreen> {
+  List<int> sequence = [];
+  List<int> user = [];
+  int coins = 0;
+  bool showing = true;
+
+  @override
+  void initState() {
+    super.initState();
+    final rnd = Random();
+    sequence = List.generate(5, (_) => rnd.nextInt(9)+1);
+    showing = true;
+    Future.delayed(const Duration(seconds: 2), () {
+      setState(() { showing = false; });
+    });
+  }
+
+  void pick(int n) async {
+    if (showing) return;
+    user.add(n);
+    final idx = user.length - 1;
+    if (user[idx] != sequence[idx]) {
+      await widget.store.addHistory({'course': widget.course, 'week': widget.week, 'mode': 'Memory', 'score': 0, 'total': sequence.length, 'coins': 0, 'date': DateTime.now().toIso8601String()});
+      await widget.store.updateDailyStreak(widget.course);
+      if (!mounted) return;
+      showDialog(context: context, builder: (_) => AlertDialog(title: const Text('Failed'), content: Text('Sequence was ${sequence.join(', ')}'), actions: [TextButton(onPressed: ()=>Navigator.pop(context), child: const Text('OK'))]));
+      return;
+    }
+    if (user.length == sequence.length) {
+      coins = 50; // big reward
+      await widget.store.addCoins(coins);
+      await widget.store.addHistory({'course': widget.course, 'week': widget.week, 'mode': 'Memory', 'score': sequence.length, 'total': sequence.length, 'coins': coins, 'date': DateTime.now().toIso8601String()});
+      await widget.store.updateDailyStreak(widget.course);
+      if (!mounted) return;
+      showDialog(context: context, builder: (_) => AlertDialog(title: const Text('Success'), content: Text('You earned $coins coins!'), actions: [TextButton(onPressed: ()=>Navigator.pop(context), child: const Text('OK'))]));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Memory Challenge'), backgroundColor: widget.color),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          const Text('Remember the sequence shown below'),
+          const SizedBox(height: 12),
+          Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(showing ? sequence.join('  ') : '—  —  —  —  —', style: const TextStyle(letterSpacing: 6, fontSize: 18)))),
+          const SizedBox(height: 12),
+          Wrap(spacing: 8, runSpacing: 8, children: List.generate(9, (i) => ElevatedButton(onPressed: ()=>pick(i+1), child: Text('${i+1}')))),
+          const Spacer(),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- QUICK TRIVIA ---------------------
+class QuickTriviaScreen extends StatefulWidget {
+  final PersistenceService store;
+  const QuickTriviaScreen({super.key, required this.store});
+  @override
+  State<QuickTriviaScreen> createState() => _QuickTriviaScreenState();
+}
+
+class _QuickTriviaScreenState extends State<QuickTriviaScreen> {
+  late List<Map<String,dynamic>> pool;
+  int idx = 0, score = 0, coins = 0;
+  String? selected;
+  @override
+  void initState() {
+    super.initState();
+    pool = [];
+    quizBank.forEach((course, weeks) {
+      weeks.forEach((w, qs) => pool.addAll(qs));
+    });
+    pool.shuffle();
+    pool = pool.take(10).toList();
+  }
+
+  void pick(String opt) async {
+    if (selected != null) return;
+    setState(() => selected = opt);
+    final correct = pool[idx]['ans'] as String;
+    if (opt == correct) { score++; coins += 5; }
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (idx < pool.length - 1) setState(() { idx++; selected = null; });
+    else {
+      await widget.store.addCoins(coins);
+      await widget.store.addHistory({'course': 'Mixed', 'week': 'Quick', 'mode': 'Quick', 'score': score, 'total': pool.length, 'coins': coins, 'date': DateTime.now().toIso8601String()});
+      await widget.store.updateDailyStreak('Mixed');
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => EndOfWeekSummary(course: 'Quick Trivia', week: 'N/A', questions: pool, userAnswers: List<String?>.filled(pool.length, null), score: score, total: pool.length, coins: coins, store: widget.store, color: Colors.teal)));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = pool[idx];
+    return Scaffold(
+      appBar: AppBar(title: const Text('Quick Trivia')),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Text('Q ${idx+1}/${pool.length}'),
+          const SizedBox(height: 8),
+          Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(q['q'] as String))),
+          const SizedBox(height: 8),
+          ...((q['options'] as List<String>).map((o) => Container(margin: const EdgeInsets.symmetric(vertical: 6), child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: selected != null ? (o==q['ans']?Colors.green:(o==selected?Colors.red:null)) : null), onPressed: selected==null?()=>pick(o):null, child: Text(o))))),
+          const Spacer(),
+          Text('Score: $score   Coins: $coins 🪙'),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- TIME ATTACK ---------------------
+class TimeAttackScreen extends StatefulWidget {
+  final PersistenceService store;
+  const TimeAttackScreen({super.key, required this.store});
+  @override
+  State<TimeAttackScreen> createState() => _TimeAttackScreenState();
+}
+
+class _TimeAttackScreenState extends State<TimeAttackScreen> {
+  int timeLeft = 30;
+  late Timer timer;
+  int score = 0, coins = 0;
+  late List<Map<String,dynamic>> pool;
+  int idx = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    pool = [];
+    quizBank.forEach((c,wmap){ wmap.forEach((w,qs){ pool.addAll(qs); });});
+    pool.shuffle();
+    pool = pool.take(20).toList();
+    timer = Timer.periodic(const Duration(seconds:1), (t) {
+      setState(()=> timeLeft--);
+      if (timeLeft<=0) finish();
+    });
+  }
+
+  void pick(String opt) { if (timeLeft<=0) return; final q = pool[idx]; if (opt==q['ans']){ score++; coins+=3;} idx = (idx+1) % pool.length; setState((){});}
+
+  Future<void> finish() async {
+    timer.cancel();
+    await widget.store.addCoins(coins);
+    await widget.store.addHistory({'course': 'TimeAttack', 'week':'N/A','mode':'Time', 'score': score, 'total': 0, 'coins': coins, 'date': DateTime.now().toIso8601String()});
+    await widget.store.updateDailyStreak('TimeAttack');
+    if (!mounted) return;
+    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => EndOfWeekSummary(course: 'Time Attack', week: 'N/A', questions: pool, userAnswers: List<String?>.filled(pool.length, null), score: score, total: 0, coins: coins, store: widget.store, color: Colors.teal)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = pool[idx];
+    return Scaffold(
+      appBar: AppBar(title: const Text('Time Attack')),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Text('Time left: $timeLeft s', style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(q['q'] as String))),
+          const SizedBox(height: 8),
+          ...((q['options'] as List<String>).map((o) => Container(margin: const EdgeInsets.symmetric(vertical:6), child: ElevatedButton(onPressed: ()=>pick(o), child: Text(o))))),
+          const Spacer(),
+          Text('Score: $score   Coins: $coins 🪙'),
+        ]),
+      ),
+    );
+  }
+}
+
+/// --------------------- SHORT MEMORY MINI GAME ---------------------
+class ShortMemoryGame extends StatefulWidget {
+  final PersistenceService store;
+  const ShortMemoryGame({super.key, required this.store});
+  @override
+  State<ShortMemoryGame> createState() => _ShortMemoryGameState();
+}
+
+class _ShortMemoryGameState extends State<ShortMemoryGame> {
+  List<int> seq = [];
+  List<int> user = [];
+  bool showing = true;
+  int coins = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    seq = List.generate(4, (_) => Random().nextInt(9)+1);
+    Future.delayed(const Duration(seconds: 2), () => setState(()=> showing=false));
+  }
+
+  void pick(int v) async {
+    if (showing) return;
+    user.add(v);
+    final idx = user.length-1;
+    if (user[idx] != seq[idx]) {
+      await widget.store.addHistory({'course':'Mini','week':'Mem','mode':'MiniMem','score':0,'total':seq.length,'coins':0,'date':DateTime.now().toIso8601String()});
+      await widget.store.updateDailyStreak('MiniMem');
+      if (!mounted) return;
+      showDialog(context: context, builder: (_) => AlertDialog(title: const Text('Oops'), content: Text('Sequence was ${seq.join(', ')}'), actions: [TextButton(onPressed: ()=>Navigator.pop(context), child: const Text('OK'))]));
+      return;
+    }
+    if (user.length == seq.length) {
+      coins = 20;
+      await widget.store.addCoins(coins);
+      await widget.store.addHistory({'course':'Mini','week':'Mem','mode':'MiniMem','score':seq.length,'total':seq.length,'coins':coins,'date':DateTime.now().toIso8601String()});
+      await widget.store.updateDailyStreak('MiniMem');
+      if (!mounted) return;
+      showDialog(context: context, builder: (_) => AlertDialog(title: const Text('Nice!'), content: Text('You earned $coins coins'), actions: [TextButton(onPressed: ()=>Navigator.pop(context), child: const Text('OK'))]));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(appBar: AppBar(title: const Text('Memory Mini Game')), body: Padding(padding: const EdgeInsets.all(12), child: Column(children: [
+      const Text('Remember the sequence'),
+      const SizedBox(height: 8),
+      Card(child: Padding(padding: const EdgeInsets.all(12), child: Text(showing ? seq.join('  ') : '—  —  —  —', style: const TextStyle(letterSpacing: 8)))),
+      const SizedBox(height: 8),
+      Wrap(spacing: 6, children: List.generate(9, (i) => ElevatedButton(onPressed: ()=>pick(i+1), child: Text('${i+1}')))),
+    ])));
+  }
+}
+
+/// --------------------- HISTORY ---------------------
+class HistoryScreen extends StatelessWidget {
+  final PersistenceService store;
+  const HistoryScreen({super.key, required this.store});
+  @override
+  Widget build(BuildContext context) {
+    final hist = store.history;
+    return Scaffold(
+      appBar: AppBar(title: const Text('History')),
+      body: ListView.builder(itemCount: hist.length, itemBuilder: (_,i){
+        final item = Map<String,dynamic>.from(hist[i]);
+        final dt = DateTime.parse(item['date']).toLocal();
+        final dateStr = '${dt.year}-${dt.month.toString().padLeft(2,'0')}-${dt.day.toString().padLeft(2,'0')} ${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+        return Card(child: ListTile(leading: const Icon(Icons.article), title: Text('${item['course']} • ${item['week']} (${item['mode'] ?? 'Weekly'})'), subtitle: Text('Score: ${item['score']}/${item['total']} • Coins: ${item['coins']} • $dateStr')));
+      }),
+    );
+  }
+}
+
+/// --------------------- SETTINGS ---------------------
+class SettingsScreen extends StatelessWidget {
+  final PersistenceService store;
+  const SettingsScreen({super.key, required this.store});
+  @override
+  Widget build(BuildContext context) {
+    final coins = store.coins;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: Padding(padding: const EdgeInsets.all(12), child: Column(children: [
+        ListTile(title: const Text('Total Coins'), trailing: Text('$coins 🪙')),
+        const Divider(),
+        ListTile(leading: const Icon(Icons.delete_forever), title: const Text('Reset All Progress'), subtitle: const Text('Clears coins, history, streaks, profile'),
+          onTap: (){
+            showDialog(context: context, builder: (_) => AlertDialog(title: const Text('Confirm'), content: const Text('Clear all progress?'), actions: [TextButton(onPressed: ()=>Navigator.pop(context), child: const Text('Cancel')), TextButton(onPressed: () async { await store.clearAll(); Navigator.pop(context); Navigator.pop(context); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cleared'))); }, child: const Text('Yes'))]));
+          },
+        ),
+      ])),
+    );
+  }
+}
