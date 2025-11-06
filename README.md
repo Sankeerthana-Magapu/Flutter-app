@@ -33,10 +33,7 @@ Built using **Flutter**, **Dart**, and **SharedPreferences** for persistent loca
 lib/
 │
 ├── main.dart              # Entry point (QuizMasterApp)
-├── models/                # Data models (if any)
-├── screens/               # HomeScreen, QuizScreen, ProfileScreen
-├── services/              # PersistenceService for local storage
-└── widgets/               # Reusable UI widgets
+
 ```
 
 ---
@@ -73,7 +70,6 @@ lib/
 <img width="938" height="478" alt="image" src="https://github.com/user-attachments/assets/27537d83-345b-4ab4-8ce7-d76bf4b148b7" />
 |
 
-> Add your screenshots in the `screenshots/` folder.
 
 ---
 
@@ -97,10 +93,4 @@ Feel free to fork this repo, make improvements, and submit a pull request.
 
 This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
 
----
 
-## 💡 Author
-
-**Sankeerthana Magapu**  
-Flutter Developer ✨  
-[GitHub Profile](https://github.com/Sankeerthana-Magapu)
