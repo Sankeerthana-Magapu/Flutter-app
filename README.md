@@ -64,14 +64,12 @@ lib/
 ## 📸 Screenshots
 
 | Home Screen | Quiz Screen | Results Screen |
-|--------------|-------------|----------------|
-| ![Home].
+
+
 <img width="940" height="529" alt="image" src="https://github.com/user-attachments/assets/8ab1898f-0794-4a33-b0f7-2da22dabb961" />
 
-| ![Quiz]
 <img width="939" height="423" alt="image" src="https://github.com/user-attachments/assets/750776df-afc3-41e4-8d9d-5dec31423e21" />
 
-| ![Results]
 <img width="938" height="478" alt="image" src="https://github.com/user-attachments/assets/27537d83-345b-4ab4-8ce7-d76bf4b148b7" />
 |
 
